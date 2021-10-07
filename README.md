@@ -22,8 +22,8 @@ This script will:
 
 1. Enumerate all projects within a given cloud org.
 2. Iterate all users within a Workspace domain tied to the cloud org.
-3. For each user, use _user impersonation_ to identify which organizations they has access to.
-4. For each user, use _user impersonation_ to identify which projects they has access to.
+3. For each user, use _user impersonation_ to identify which organizations they have access to.
+4. For each user, use _user impersonation_ to identify which projects they have access to.
 5. If the user has access to any other organization that's not in the subject org in #1, print that external org.
 6. If the user has access to any other project thats not in the set in #1, print that external project.
 
