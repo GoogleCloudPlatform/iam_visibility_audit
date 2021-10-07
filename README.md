@@ -154,10 +154,10 @@ googleapi: Error 429: Quota exceeded for quota metric 'List projects V1' and lim
 
 There are several ways to work with this:
 
-- Sleep: a2s `sleep` is applied per User thats evaluated
+- Sleep: a `sleep` is applied per User thats evaluated
 
 ```golang
-delay                      = flag.Int("delay", 2*1000, "delay in ms for each user iterated")
+delay                      = flag.Int("delay", 1*1000, "delay in ms for each user iterated")
 
 time.Sleep(time.Duration(*delay) * time.Millisecond)
 ```
@@ -165,7 +165,7 @@ time.Sleep(time.Duration(*delay) * time.Millisecond)
 - Throttling: all api calls for the resource managers is capped using `"golang.org/x/time/rate"`
 
 ```golang
-	maxRequestsPerSecond float64 = 3 // "golang.org/x/time/rate" limiter to throttle operations
+	maxRequestsPerSecond float64 = 4 // "golang.org/x/time/rate" limiter to throttle operations
 	burst                int     = 1
 ```
 
@@ -173,20 +173,17 @@ which within the iteration to get the list of projects and organization:
 
 ```golang
 	req := crmService.Projects.List().Filter(noFilter).PageSize(maxPageSize)
-	if err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
+	err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
 		projects = append(projects, page.Projects...)
 		if err := limiter.Wait(ctx); err != nil {
 			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
 			return err
 		}
-		if ctx.Err() != nil {
-			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, ctx.Err())
-			return ctx.Err()
-		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
-		return []*cloudresourcemanager.Project{}, err
+		return nil, err
 	}
 
 	for _, p := range projects {
@@ -201,7 +198,9 @@ It is recommended to not alter these defaults.  They have been empirically teste
 
 * 1584 users within the org
 * 4623 projects with in the org
-* took ~55min runtime
+* took ~25min runtime
+
+If you still see rate errors, reduce `maxRequestsPerSecond` and increase `delay`
 
 The other approach which is not implemented here is to shard the requests between N projects.
 
@@ -213,9 +212,9 @@ Each "shard" that runs a script iterates over a smaller set of user.  For exampl
 3. run three versions of the audit scripts using different projectIDs and ServiceAccounts
 4. each 'version' of the audit script iterates over a subset of the domain accounts
 
-   `SA` iterates of users `"A->H"`
-   `SB` iterates over `"I->P"`
-   `SC` iterates over `"Q->Z"`
+   - `SA` iterates of users `"A->H"`
+   - `SB` iterates over `"I->P"`
+   - `SC` iterates over `"Q->Z"`
 
 This technique will shard the api quota rate limits between each of the host projects
 

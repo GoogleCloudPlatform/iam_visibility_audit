@@ -69,7 +69,7 @@ var (
 	organization               = flag.String("organization", "", "The organizationID that is the subject of this audit")
 	subject                    = flag.String("subject", "", "The admin user to for the organization that can use the Directory API to list users")
 	cx                         = flag.String("cx", "", "Workspace Customer ID number")
-	delay                      = flag.Int("delay", 2*1000, "delay in ms for each user iterated")
+	delay                      = flag.Int("delay", 1*1000, "delay in ms for each user iterated")
 	allProjects                = make(map[string]*assetpb.ResourceSearchResult)
 	allOrganizations           = make(map[string]*assetpb.ResourceSearchResult)
 	limiter                    *rate.Limiter
@@ -77,7 +77,7 @@ var (
 )
 
 const (
-	maxRequestsPerSecond float64 = 3 // "golang.org/x/time/rate" limiter to throttle operations
+	maxRequestsPerSecond float64 = 4 // "golang.org/x/time/rate" limiter to throttle operations
 	burst                int     = 1
 	maxPageSize          int64   = 1000
 )
@@ -96,12 +96,12 @@ func getOrganizations(ctx context.Context, u admin.User) ([]*cloudresourcemanage
 		})
 		if err != nil {
 			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Organization{}, err
+			return nil, err
 		}
 		crmService, err = cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts))
 		if err != nil {
 			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Organization{}, err
+			return nil, err
 		}
 	} else {
 		cred, err := google.CredentialsFromJSONWithParams(ctx, svcAccountJSONBytes, google.CredentialsParams{
@@ -110,37 +110,36 @@ func getOrganizations(ctx context.Context, u admin.User) ([]*cloudresourcemanage
 		})
 		if err != nil {
 			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Organization{}, err
+			return nil, err
 		}
 		crmService, err = cloudresourcemanager.NewService(ctx, option.WithCredentials(cred))
 		if err != nil {
 			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Organization{}, err
+			return nil, err
 		}
 	}
 
 	organizations := make([]*cloudresourcemanager.Organization, 0)
 
-	// do not apply a  filter here; we need to audit all projects
-	//  https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#SearchOrganizationsRequest
+	// We need to iterate over all organizations visible to the current user
+	// The noFilter is explicitly defined here to allow you to modify which organizations to
+	// limit the query.
+	// see https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#SearchOrganizationsRequest
 	noFilter := ""
 
 	req := crmService.Organizations.Search(&cloudresourcemanager.SearchOrganizationsRequest{Filter: noFilter, PageSize: maxPageSize})
 
-	if err := req.Pages(ctx, func(page *cloudresourcemanager.SearchOrganizationsResponse) error {
+	err := req.Pages(ctx, func(page *cloudresourcemanager.SearchOrganizationsResponse) error {
 		organizations = append(organizations, page.Organizations...)
 		if err := limiter.Wait(ctx); err != nil {
 			glog.Fatalf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
 			return err
 		}
-		if ctx.Err() != nil {
-			glog.Fatalf("Error in rate limiter for user %s %v", u.PrimaryEmail, ctx.Err())
-			return ctx.Err()
-		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		glog.Errorf("Error iterating visible organizations for user %s %v", u.PrimaryEmail, err)
-		return []*cloudresourcemanager.Organization{}, err
+		return nil, err
 	}
 
 	for _, o := range organizations {
@@ -166,12 +165,12 @@ func getProjects(ctx context.Context, u admin.User) ([]*cloudresourcemanager.Pro
 		})
 		if err != nil {
 			glog.Errorf("Error creating CRM credentials for user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Project{}, err
+			return nil, err
 		}
 		crmService, err = cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts))
 		if err != nil {
 			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Project{}, err
+			return nil, err
 		}
 	} else {
 		cred, err := google.CredentialsFromJSONWithParams(ctx, svcAccountJSONBytes, google.CredentialsParams{
@@ -180,35 +179,37 @@ func getProjects(ctx context.Context, u admin.User) ([]*cloudresourcemanager.Pro
 		})
 		if err != nil {
 			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Project{}, err
+			return nil, err
 		}
 		crmService, err = cloudresourcemanager.NewService(ctx, option.WithCredentials(cred))
 		if err != nil {
 			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return []*cloudresourcemanager.Project{}, err
+			return nil, err
 		}
 	}
 
 	projects := make([]*cloudresourcemanager.Project, 0)
-	// do not apply a list filter here; we need to audit all projects
+	//  The Project.List() accepts a Filter parameter which will return a subset
+	//  of projects that match the  specifications.
+	//  By default, if the Filter value is not set, all projects will be returned.
+	//  However, the code below leaves the parameter
+	//  explicitly defined in the event you want to query and evaluate on a
+	//  subset of projects.  See:
 	//  https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#ProjectsListCall.Filter
 	noFilter := ""
 
 	req := crmService.Projects.List().Filter(noFilter).PageSize(maxPageSize)
-	if err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
+	err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
 		projects = append(projects, page.Projects...)
 		if err := limiter.Wait(ctx); err != nil {
 			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
 			return err
 		}
-		if ctx.Err() != nil {
-			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, ctx.Err())
-			return ctx.Err()
-		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
-		return []*cloudresourcemanager.Project{}, err
+		return nil, err
 	}
 
 	for _, p := range projects {
@@ -226,8 +227,10 @@ func main() {
 	defer glog.Flush()
 	ctx := context.Background()
 
-	// configure API rate limits
+	// Configure a rate limiter that will control how frequently API calls to
+	// Cloud Resource Manager is made.
 	limiter = rate.NewLimiter(rate.Limit(maxRequestsPerSecond), burst)
+
 	if *organization == "" || *subject == "" || *cx == "" {
 		glog.Error("--organization and --cx and --subject   must be specified")
 		return
@@ -245,8 +248,8 @@ func main() {
 		}
 	}
 
-	// now initialize the Cloud Asset API
-	//  this api is used to find the projects in an ORG
+	// Initialize the Cloud Asset API.
+	// This api is used to find the projects in an ORG
 	var assetClient *asset.Client
 	if *impersonatedServiceAccount != "" {
 		ts, err := impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
@@ -273,10 +276,9 @@ func main() {
 		}
 	}
 
-	// use asset-api API to recall/find the Organization for provided organizationID.  We don't really need to do this section
-	//  since the the orgID was provided in the input argument.
-	//  Were doing this as a type of input validation with the asset-api to search/narrow the organization.
-	//  the resource-manager would also work https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#OrganizationsGetCall
+	// Use the Cloud Asset API to recall/find the Organization for provided organizationID.
+	// We don not really need to do this section since the the orgID was provided in the input argument.
+	// We are doing this as a type of input validation with the asset-api to search/narrow the organization.
 	assetType := "cloudresourcemanager.googleapis.com/Organization"
 	req := &assetpb.SearchAllResourcesRequest{
 		Scope:      fmt.Sprintf("organizations/%s", *organization),
@@ -298,11 +300,12 @@ func main() {
 		allOrganizations[fmt.Sprintf("organizations/%s", orgName)] = response
 	}
 
-	// use asset-ap API to recall/find the projects under the provided organizationID.
-	//  we do not use the resource manager api here since that would return all the projects
-	//   the caller has access to, not just restricted to the organization we want.
-	//    https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#ProjectsListCall
-	// emptyQuery: search all projects https://cloud.google.com/asset-inventory/docs/searching-resources#how_to_construct_a_query
+	// Use the Cloud Asset API to recall/find the projects for provided organizationID.
+	// We do not use the Resource Manager api here since that would return all the projects
+	// the caller has access to, not just those restricted to the organization we want.
+	// We are also setting a default "emptyQuery" value here to return all projects.
+	// You can specify a query filter here to configure the set of projects to evaluate.
+	// see https://cloud.google.com/asset-inventory/docs/searching-resources#how_to_construct_a_query
 	emptyQuery := ""
 	assetType = "cloudresourcemanager.googleapis.com/Project"
 	req = &assetpb.SearchAllResourcesRequest{
@@ -328,8 +331,8 @@ func main() {
 
 	glog.V(20).Infoln("      Getting Users")
 
-	// initialize the Workspace admin client first
-	//  this client will be used to find users in a domain
+	// Initialize the Workspace Admin client
+	// This client will be used to find users in a given Cloud Identity/Workspace domain
 	var adminService *admin.Service
 	if *impersonatedServiceAccount != "" {
 		ts, err := impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
@@ -357,11 +360,11 @@ func main() {
 			glog.Fatal(err)
 		}
 	}
-	// if you want to narrow the search to a subset of users, apply a filter
-	//  https://developers.google.com/admin-sdk/directory/v1/guides/search-users
-	//	searchFilter := "isAdmin=false"
 
-	// for now, look for all users
+	// If you want to narrow the search to a subset of users, apply a searchFilter here
+	//  https://developers.google.com/admin-sdk/directory/v1/guides/search-users
+	//	eg. searchFilter := "isAdmin=false"
+
 	searchFilter := ""
 
 	pageToken := ""
@@ -376,8 +379,11 @@ func main() {
 		}
 		for _, u := range r.Users {
 			glog.V(20).Infof("      Found User: %s", u.PrimaryEmail)
-			// just use goroutines to print out the visibility
-			//  (do nothing with the returned arrays)
+			// Launch goroutines that will query which projects and
+			// organizations the current user has visibility to.
+			// THe getOrganizations(), and getProjects() returns values
+			// but we will ingore them here simply print out
+			// the findings to stdout/glog from within the routine
 			wg.Add(1)
 			go getOrganizations(ctx, *u)
 			wg.Add(1)
