@@ -15,8 +15,7 @@
 package main
 
 /*
-
-Enumerate all projects and organizations Workspace users may have access to outside
+Command iam_visibility_audit will enumerate all projects and organizations Workspace users may have access to outside
 of their primary organizationID.
 
 see:
@@ -34,7 +33,7 @@ Arguments:
 
 Usage:
 
-$ go run main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
+$ go run cmd/main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
   --subject=$DOMAIN_ADMIN \
   --organization $ORGANIZATION_ID \
   -cx $CX --alsologtostderr=1 -v 10
@@ -81,145 +80,6 @@ const (
 	burst                int     = 1
 	maxPageSize          int64   = 1000
 )
-
-func getOrganizations(ctx context.Context, u admin.User) ([]*cloudresourcemanager.Organization, error) {
-	glog.V(50).Infof("             Getting Organizations for user %s", u.PrimaryEmail)
-	defer wg.Done()
-
-	var crmService *cloudresourcemanager.Service
-
-	if *impersonatedServiceAccount != "" {
-		ts, err := impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
-			TargetPrincipal: *impersonatedServiceAccount,
-			Scopes:          []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
-			Subject:         u.PrimaryEmail,
-		})
-		if err != nil {
-			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-		crmService, err = cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts))
-		if err != nil {
-			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-	} else {
-		cred, err := google.CredentialsFromJSONWithParams(ctx, svcAccountJSONBytes, google.CredentialsParams{
-			Scopes:  []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
-			Subject: u.PrimaryEmail,
-		})
-		if err != nil {
-			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-		crmService, err = cloudresourcemanager.NewService(ctx, option.WithCredentials(cred))
-		if err != nil {
-			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-	}
-
-	organizations := make([]*cloudresourcemanager.Organization, 0)
-
-	// We need to iterate over all organizations visible to the current user
-	// The noFilter is explicitly defined here to allow you to modify which organizations to
-	// limit the query.
-	// see https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#SearchOrganizationsRequest
-	noFilter := ""
-
-	req := crmService.Organizations.Search(&cloudresourcemanager.SearchOrganizationsRequest{Filter: noFilter, PageSize: maxPageSize})
-
-	err := req.Pages(ctx, func(page *cloudresourcemanager.SearchOrganizationsResponse) error {
-		organizations = append(organizations, page.Organizations...)
-		if err := limiter.Wait(ctx); err != nil {
-			glog.Fatalf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		glog.Errorf("Error iterating visible organizations for user %s %v", u.PrimaryEmail, err)
-		return nil, err
-	}
-
-	for _, o := range organizations {
-		glog.V(50).Infof("             User %s has Organiation visibility to %s", u.PrimaryEmail, o.Name)
-		if _, ok := allOrganizations[o.Name]; !ok {
-			glog.V(2).Infof("             User [%s] has external organization visibility to [%s](%s)", u.PrimaryEmail, o.Name, o.DisplayName)
-		}
-	}
-	return organizations, nil
-}
-
-func getProjects(ctx context.Context, u admin.User) ([]*cloudresourcemanager.Project, error) {
-	glog.V(50).Infof("             Getting Projects for user %s", u.PrimaryEmail)
-	defer wg.Done()
-
-	var crmService *cloudresourcemanager.Service
-
-	if *impersonatedServiceAccount != "" {
-		ts, err := impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
-			TargetPrincipal: *impersonatedServiceAccount,
-			Scopes:          []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
-			Subject:         u.PrimaryEmail,
-		})
-		if err != nil {
-			glog.Errorf("Error creating CRM credentials for user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-		crmService, err = cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts))
-		if err != nil {
-			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-	} else {
-		cred, err := google.CredentialsFromJSONWithParams(ctx, svcAccountJSONBytes, google.CredentialsParams{
-			Scopes:  []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
-			Subject: u.PrimaryEmail,
-		})
-		if err != nil {
-			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-		crmService, err = cloudresourcemanager.NewService(ctx, option.WithCredentials(cred))
-		if err != nil {
-			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
-			return nil, err
-		}
-	}
-
-	projects := make([]*cloudresourcemanager.Project, 0)
-	//  The Project.List() accepts a Filter parameter which will return a subset
-	//  of projects that match the  specifications.
-	//  By default, if the Filter value is not set, all projects will be returned.
-	//  However, the code below leaves the parameter
-	//  explicitly defined in the event you want to query and evaluate on a
-	//  subset of projects.  See:
-	//  https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#ProjectsListCall.Filter
-	noFilter := ""
-
-	req := crmService.Projects.List().Filter(noFilter).PageSize(maxPageSize)
-	err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
-		projects = append(projects, page.Projects...)
-		if err := limiter.Wait(ctx); err != nil {
-			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
-		return nil, err
-	}
-
-	for _, p := range projects {
-		glog.V(50).Infof("             User %s has Project visibility to %s", u.PrimaryEmail, p.ProjectId)
-		if _, ok := allProjects[p.ProjectId]; !ok {
-			glog.V(2).Infof("             User [%s] has external project visibility to [projects/%d](%s)", u.PrimaryEmail, p.ProjectNumber, p.ProjectId)
-		}
-	}
-	return projects, nil
-}
 
 func main() {
 
@@ -396,4 +256,143 @@ func main() {
 		}
 	}
 	wg.Wait()
+}
+
+func getOrganizations(ctx context.Context, u admin.User) ([]*cloudresourcemanager.Organization, error) {
+	glog.V(50).Infof("             Getting Organizations for user %s", u.PrimaryEmail)
+	defer wg.Done()
+
+	var crmService *cloudresourcemanager.Service
+
+	if *impersonatedServiceAccount != "" {
+		ts, err := impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
+			TargetPrincipal: *impersonatedServiceAccount,
+			Scopes:          []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
+			Subject:         u.PrimaryEmail,
+		})
+		if err != nil {
+			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+		crmService, err = cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts))
+		if err != nil {
+			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+	} else {
+		cred, err := google.CredentialsFromJSONWithParams(ctx, svcAccountJSONBytes, google.CredentialsParams{
+			Scopes:  []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
+			Subject: u.PrimaryEmail,
+		})
+		if err != nil {
+			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+		crmService, err = cloudresourcemanager.NewService(ctx, option.WithCredentials(cred))
+		if err != nil {
+			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+	}
+
+	organizations := make([]*cloudresourcemanager.Organization, 0)
+
+	// We need to iterate over all organizations visible to the current user
+	// The noFilter is explicitly defined here to allow you to modify which organizations to
+	// limit the query.
+	// see https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#SearchOrganizationsRequest
+	noFilter := ""
+
+	req := crmService.Organizations.Search(&cloudresourcemanager.SearchOrganizationsRequest{Filter: noFilter, PageSize: maxPageSize})
+
+	err := req.Pages(ctx, func(page *cloudresourcemanager.SearchOrganizationsResponse) error {
+		organizations = append(organizations, page.Organizations...)
+		if err := limiter.Wait(ctx); err != nil {
+			glog.Fatalf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		glog.Errorf("Error iterating visible organizations for user %s %v", u.PrimaryEmail, err)
+		return nil, err
+	}
+
+	for _, o := range organizations {
+		glog.V(50).Infof("             User %s has Organiation visibility to %s", u.PrimaryEmail, o.Name)
+		if _, ok := allOrganizations[o.Name]; !ok {
+			glog.V(2).Infof("             User [%s] has external organization visibility to [%s](%s)", u.PrimaryEmail, o.Name, o.DisplayName)
+		}
+	}
+	return organizations, nil
+}
+
+func getProjects(ctx context.Context, u admin.User) ([]*cloudresourcemanager.Project, error) {
+	glog.V(50).Infof("             Getting Projects for user %s", u.PrimaryEmail)
+	defer wg.Done()
+
+	var crmService *cloudresourcemanager.Service
+
+	if *impersonatedServiceAccount != "" {
+		ts, err := impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
+			TargetPrincipal: *impersonatedServiceAccount,
+			Scopes:          []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
+			Subject:         u.PrimaryEmail,
+		})
+		if err != nil {
+			glog.Errorf("Error creating CRM credentials for user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+		crmService, err = cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts))
+		if err != nil {
+			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+	} else {
+		cred, err := google.CredentialsFromJSONWithParams(ctx, svcAccountJSONBytes, google.CredentialsParams{
+			Scopes:  []string{cloudresourcemanager.CloudPlatformReadOnlyScope},
+			Subject: u.PrimaryEmail,
+		})
+		if err != nil {
+			glog.Errorf("Error creating CRM credentials for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+		crmService, err = cloudresourcemanager.NewService(ctx, option.WithCredentials(cred))
+		if err != nil {
+			glog.Errorf("Error creating CRM Service for  user %s,  %v", u.PrimaryEmail, err)
+			return nil, err
+		}
+	}
+
+	projects := make([]*cloudresourcemanager.Project, 0)
+	//  The Project.List() accepts a Filter parameter which will return a subset
+	//  of projects that match the  specifications.
+	//  By default, if the Filter value is not set, all projects will be returned.
+	//  However, the code below leaves the parameter
+	//  explicitly defined in the event you want to query and evaluate on a
+	//  subset of projects.  See:
+	//  https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#ProjectsListCall.Filter
+	noFilter := ""
+
+	req := crmService.Projects.List().Filter(noFilter).PageSize(maxPageSize)
+	err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
+		projects = append(projects, page.Projects...)
+		if err := limiter.Wait(ctx); err != nil {
+			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
+		return nil, err
+	}
+
+	for _, p := range projects {
+		glog.V(50).Infof("             User %s has Project visibility to %s", u.PrimaryEmail, p.ProjectId)
+		if _, ok := allProjects[p.ProjectId]; !ok {
+			glog.V(2).Infof("             User [%s] has external project visibility to [projects/%d](%s)", u.PrimaryEmail, p.ProjectNumber, p.ProjectId)
+		}
+	}
+	return projects, nil
 }

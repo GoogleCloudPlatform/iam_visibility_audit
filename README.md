@@ -6,11 +6,11 @@ For example, `Alice` is a member of Cloud Org `MyDomain`.  Alice has access to p
 
 `Bob` creates a project `D` in Cloud Org `OtherDomain`. `Bob` grants IAM permissions to `Alice `to have access to project `D`.  If `Alice` accepts the invite from `Bob` to use project `D`, `Alice` now has access to a project outside of the primary cloud org domain.
 
-In another situation, Alice may have created a project early on before the domain `MyDomain` was created.  Later on, an org admin will have to identify and [migrate projects](https://cloud.google.com/resource-manager/docs/project-migration) into the new domain, `MyDomain`.  
+In another situation, `Alice` may have created a project early on before the domain `MyDomain` was created.  Later on, an org admin will have to identify and [migrate projects](https://cloud.google.com/resource-manager/docs/project-migration) into the new domain, `MyDomain`.  
 
 This script will help identify which projects a user in a domain may have been granted access to external projects or organizations.
 
-Either way, please review [Restricting project visibility for users](https://cloud.google.com/resource-manager/docs/access-control-org#restricting_visibility) in combination with [VPC-SC](https://cloud.google.com/vpc-service-controls/docs/overview)
+Either way, please review [Restricting project visibility for users](https://cloud.google.com/resource-manager/docs/access-control-org#restricting_visibility) in combination with [VPC-SC](https://cloud.google.com/vpc-service-controls/docs/overview).
 
 >> This is not an officially supported Google product
 
@@ -20,21 +20,21 @@ Please note that Google Cloud Support will not identify owners of projects not a
 
 This script will:
 
-1. Enumerate all projects within a given cloud org
-2. Iterate all users within a Workspace domain tied to the cloud org
-3. For each user, use _user impersonation_ to identify which organizations he/she has access to.
-4. For each user, use _user impersonation_ to identify which projects he/she has access to.
-5. If the user has access to any other organization thats not in the subject org in #1, print that external org
-6. If the user has access to any other project thats not in the set in #1, print that external project
+1. Enumerate all projects within a given cloud org.
+2. Iterate all users within a Workspace domain tied to the cloud org.
+3. For each user, use _user impersonation_ to identify which organizations they has access to.
+4. For each user, use _user impersonation_ to identify which projects they has access to.
+5. If the user has access to any other organization that's not in the subject org in #1, print that external org.
+6. If the user has access to any other project thats not in the set in #1, print that external project.
 
-For more information about Workspace domain delegation and _user impersonation_, see [Authentication Best Practices for Workspace APIs](https://static.googleusercontent.com/media/www.google.com/en//support/enterprise/static/gapps/docs/admin/en/gapps_workspace/Google%20Workspace%20APIs%20-%20Authentication%20Best%20Practices.pdf)
+For more information about Workspace domain delegation and _user impersonation_, see [Authentication Best Practices for Workspace APIs](https://static.googleusercontent.com/media/www.google.com/en//support/enterprise/static/gapps/docs/admin/en/gapps_workspace/Google%20Workspace%20APIs%20-%20Authentication%20Best%20Practices.pdf).
 
 ### Usage
 
 To configure this script, you need to have access to act as
 
-* [Google Cloud Platform Organization Admin](https://cloud.google.com/resource-manager/docs/access-control-org)
-* [Google Workspace Domain Admin](https://support.google.com/a/answer/54693)
+* [Google Cloud Platform Organization Admin](https://cloud.google.com/resource-manager/docs/access-control-org).
+* [Google Workspace Domain Admin](https://support.google.com/a/answer/54693).
 
 Once the permissions and configuration below is done, the script will run with ReadOnly/Viewer permissions to run the discovery.  These permissions are needed initially to configure the least-privilege IAM roles the script will ultimately use.
 
@@ -45,25 +45,25 @@ export PROJECT_NUMBER=`gcloud projects describe $PROJECT_ID --format="value(proj
 export DOMAIN_ADMIN=`gcloud config get-value core/account`
 
 # acquire the organization ID
-$ gcloud organizations list
-DISPLAY_NAME  ID            DIRECTORY_CUSTOMER_ID
-myDomain      673208786099  D123zw3x8
+gcloud organizations list
+	DISPLAY_NAME  ID            DIRECTORY_CUSTOMER_ID
+	myDomain      673208786099  D123zw3x8
 
 export ORGANIZATION_ID=673208786099
 
 export CX=`gcloud organizations describe $ORGANIZATION_ID --format="value(owner.directoryCustomerId)"`
 
 # create service account
-$ gcloud iam service-accounts create dwd-sa
+gcloud iam service-accounts create dwd-sa
 
-$ gcloud iam service-accounts describe dwd-sa@$PROJECT_ID.iam.gserviceaccount.com
+gcloud iam service-accounts describe dwd-sa@$PROJECT_ID.iam.gserviceaccount.com
 
 # get the service account's clientID
 export SA_CLIENT_ID=`gcloud iam service-accounts describe dwd-sa@$PROJECT_ID.iam.gserviceaccount.com --format="value(uniqueId)"`
 echo $SA_CLIENT_ID
 
 # enable impersonation instead of key-download and adapt the workspace AdminAPI to use the impersonated access token
-$ gcloud iam service-accounts  add-iam-policy-binding \
+gcloud iam service-accounts  add-iam-policy-binding \
   --role=roles/iam.serviceAccountTokenCreator \
   --member=user:$DOMAIN_ADMIN dwd-sa@$PROJECT_ID.iam.gserviceaccount.com
 
@@ -73,7 +73,7 @@ $ gcloud iam service-accounts  add-iam-policy-binding \
 # Allow service account domain IAM privileges
 #   http://cloud.google.com/asset-inventory/docs/access-control#required_permissions
 
-$ gcloud organizations add-iam-policy-binding \
+gcloud organizations add-iam-policy-binding \
    --member=serviceAccount:dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
    --role=roles/cloudasset.viewer  $ORGANIZATION_ID
 ```
@@ -104,14 +104,14 @@ Now run the utility
 
 ```bash
 # with service account impersonation (preferred)
-$ go run main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
+go run cmd/main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
   --subject=$DOMAIN_ADMIN \
   --organization $ORGANIZATION_ID \
   -cx $CX --alsologtostderr=1 -v 10
 
 
 # with service account Key (not recommended)
-# $ go run main.go --serviceAccountFile=svc_account.json \
+# go run cmd/main.go --serviceAccountFile=svc_account.json \
 #   --subject=$DOMAIN_ADMIN \
 #   --organization $ORGANIZATION_ID \
 #   -cx $CX --alsologtostderr=1 -v 10
@@ -196,9 +196,9 @@ which within the iteration to get the list of projects and organization:
 
 It is recommended to not alter these defaults.  They have been empirically tested to stay within the quota limits and benchmarked with 
 
-* 1584 users within the org
-* 4623 projects with in the org
-* took ~25min runtime
+* 1584 users within the org.
+* 4623 projects with in the org.
+* took ~25min runtime.
 
 If you still see rate errors, reduce `maxRequestsPerSecond` and increase `delay`
 
@@ -207,14 +207,14 @@ The other approach which is not implemented here is to shard the requests betwee
 That is, create several different "host" projects each with their own service accounts.  Then run the scripts in parallel with different impersonated service accounts. 
 Each "shard" that runs a script iterates over a smaller set of user.  For example, 
 
-1. create three host project `A`,`B`,`C`
-2. create three service accounts within those project `SA`, `SB`, `SC`
-3. run three versions of the audit scripts using different projectIDs and ServiceAccounts
-4. each 'version' of the audit script iterates over a subset of the domain accounts
+1. create three host project `A`,`B`,`C`.
+2. create three service accounts within those project `SA`, `SB`, `SC`.
+3. run three versions of the audit scripts using different projectIDs and ServiceAccounts.
+4. each 'version' of the audit script iterates over a subset of the domain accounts.
 
-   - `SA` iterates of users `"A->H"`
-   - `SB` iterates over `"I->P"`
-   - `SC` iterates over `"Q->Z"`
+   - `SA` iterates of users `"A->H"`.
+   - `SB` iterates over `"I->P"`.
+   - `SC` iterates over `"Q->Z"`.
 
 This technique will shard the api quota rate limits between each of the host projects
 
