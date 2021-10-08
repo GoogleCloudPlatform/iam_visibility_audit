@@ -75,6 +75,7 @@ type userAccess struct {
 	User     admin.User
 	Orgs     []*cloudresourcemanager.Organization
 	Projects []*cloudresourcemanager.Project
+	Error    error
 }
 
 func main() {
@@ -165,20 +166,30 @@ func main() {
 	// The getOrganizations(), and getProjects() applies the findings
 	// back to a go channel below for processing:
 	ch := make(chan *userAccess)
+	done := make(chan bool)
 	go func() {
 		for {
-			msg := <-ch
-			for _, o := range msg.Orgs {
-				glog.V(50).Infof("             User %s has Organization visibility to %s", msg.User.PrimaryEmail, o.Name)
-				if _, ok := allOrganizations[o.Name]; !ok {
-					glog.V(2).Infof("             User [%s] has external organization visibility to [%s](%s)", msg.User.PrimaryEmail, o.Name, o.DisplayName)
+			msg, ok := <-ch
+			if ok {
+				if msg.Error != nil {
+					glog.Errorf("Error iterating for user %s %v", msg.User.PrimaryEmail, msg.Error)
+				} else {
+					for _, o := range msg.Orgs {
+						glog.V(50).Infof("             User %s has Organization visibility to %s", msg.User.PrimaryEmail, o.Name)
+						if _, ok := allOrganizations[o.Name]; !ok {
+							glog.V(2).Infof("             User [%s] has external organization visibility to [%s](%s)", msg.User.PrimaryEmail, o.Name, o.DisplayName)
+						}
+					}
+					for _, p := range msg.Projects {
+						glog.V(50).Infof("             User %s has Project visibility to %s", msg.User.PrimaryEmail, p.ProjectId)
+						if _, ok := allProjects[p.ProjectId]; !ok {
+							glog.V(2).Infof("             User [%s] has external project visibility to [projects/%d](%s)", msg.User.PrimaryEmail, p.ProjectNumber, p.ProjectId)
+						}
+					}
 				}
-			}
-			for _, p := range msg.Projects {
-				glog.V(50).Infof("             User %s has Project visibility to %s", msg.User.PrimaryEmail, p.ProjectId)
-				if _, ok := allProjects[p.ProjectId]; !ok {
-					glog.V(2).Infof("             User [%s] has external project visibility to [projects/%d](%s)", msg.User.PrimaryEmail, p.ProjectNumber, p.ProjectId)
-				}
+			} else {
+				done <- true
+				return
 			}
 		}
 	}()
@@ -205,6 +216,10 @@ func main() {
 	}
 
 	wg.Wait()
+	// all messages should be in the channel now, close it
+	close(ch)
+	// wait for all the messages to get processed
+	<-done
 }
 
 func findDomainUsers(ctx context.Context, cx string, searchFilter string, adminService *admin.Service) ([]*admin.User, error) {
@@ -341,6 +356,10 @@ func getOrganizations(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitG
 	crmService, err := getResourceManagerClient(ctx, impersonateAccount, serviceAccountData, u.PrimaryEmail)
 	if err != nil {
 		glog.Errorf("Error getting cloud ResourceManager client for Organizations for user %s %v", u.PrimaryEmail, err)
+		ch <- &userAccess{
+			User:  u,
+			Error: err,
+		}
 		return
 	}
 	organizations := make([]*cloudresourcemanager.Organization, 0)
@@ -357,6 +376,10 @@ func getOrganizations(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitG
 	})
 	if err != nil {
 		glog.Errorf("Error iterating visible organizations for user %s %v", u.PrimaryEmail, err)
+		ch <- &userAccess{
+			User:  u,
+			Error: err,
+		}
 		return
 	}
 
@@ -373,6 +396,10 @@ func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup,
 	crmService, err := getResourceManagerClient(ctx, impersonateAccount, serviceAccountData, u.PrimaryEmail)
 	if err != nil {
 		glog.Errorf("Error getting cloud ResourceManager client for Projects for user %s %v", u.PrimaryEmail, err)
+		ch <- &userAccess{
+			User:  u,
+			Error: err,
+		}
 		return
 	}
 
@@ -388,6 +415,11 @@ func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup,
 	})
 	if err != nil {
 		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
+		ch <- &userAccess{
+			User:  u,
+			Error: err,
+		}
+		return
 	}
 
 	ch <- &userAccess{
