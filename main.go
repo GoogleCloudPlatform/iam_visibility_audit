@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
-
 /*
 Command iam_visibility_audit will enumerate all projects and organizations Workspace users may have access to outside
 of their primary organizationID.
@@ -33,11 +31,12 @@ Arguments:
 
 Usage:
 
-$ go run cmd/main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
+$ go run main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
   --subject=$DOMAIN_ADMIN \
   --organization $ORGANIZATION_ID \
   -cx $CX --alsologtostderr=1 -v 10
 */
+package main
 
 import (
 	"flag"

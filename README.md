@@ -1,6 +1,6 @@
 ## Auditing users for IAM bindings outside of primarily Cloud Organization  
 
-Sample script used identify which users within a [Cloud Organization](https://cloud.google.com/resource-manager/docs/quickstart-organizations) that may have IAM bindings in projects or organizations outside of a primary cloud org.
+Sample script to  help identify which users within a [Cloud Organization](https://cloud.google.com/resource-manager/docs/quickstart-organizations) who have IAM bindings in projects or organizations outside of a primary cloud org.
 
 For example, `Alice` is a member of Cloud Org `MyDomain`.  Alice has access to projects `A,B,C` within `MyDomain`. 
 
@@ -8,7 +8,7 @@ For example, `Alice` is a member of Cloud Org `MyDomain`.  Alice has access to p
 
 In another situation, `Alice` may have created a project early on before the domain `MyDomain` was created.  Later on, an org admin will have to identify and [migrate projects](https://cloud.google.com/resource-manager/docs/project-migration) into the new domain, `MyDomain`.  
 
-This script will help identify which projects a user in a domain may have been granted access to external projects or organizations.
+This script will help identify which _projects_ and _organizations_ a _user_ in a domain may have been granted access to external projects or organizations.  This will *not* identify direct permissions on resources _within_ a project (e.g. if `Bob` set a direct IAM grant to `Alice` on a GCS bucket that `Bob` owns).
 
 Either way, please review [Restricting project visibility for users](https://cloud.google.com/resource-manager/docs/access-control-org#restricting_visibility) in combination with [VPC-SC](https://cloud.google.com/vpc-service-controls/docs/overview).
 
@@ -104,14 +104,14 @@ Now run the utility
 
 ```bash
 # with service account impersonation (preferred)
-go run cmd/main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
+go run main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com \
   --subject=$DOMAIN_ADMIN \
   --organization $ORGANIZATION_ID \
   -cx $CX --alsologtostderr=1 -v 10
 
 
 # with service account Key (not recommended)
-# go run cmd/main.go --serviceAccountFile=svc_account.json \
+# go run main.go --serviceAccountFile=svc_account.json \
 #   --subject=$DOMAIN_ADMIN \
 #   --organization $ORGANIZATION_ID \
 #   -cx $CX --alsologtostderr=1 -v 10
