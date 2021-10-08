@@ -8,7 +8,7 @@ For example, `Alice` is a member of Cloud Org `MyDomain`.  Alice has access to p
 
 In another situation, `Alice` may have created a project early on before the domain `MyDomain` was created.  Later on, an org admin will have to identify and [migrate projects](https://cloud.google.com/resource-manager/docs/project-migration) into the new domain, `MyDomain`.  
 
-This script will help identify which _projects_ and _organizations_ a _user_ in a domain may have been granted access to external projects or organizations.  This will *not* identify direct permissions on resources _within_ a project (e.g. if `Bob` set a direct IAM grant to `Alice` on a GCS bucket that `Bob` owns).
+This script will help identify which _projects_ and _organizations_ a _user_ in a domain may have been granted access to that resides in another organizations or directly granted to a project.  This will *not* identify direct permissions on resources _within_ a project (e.g. if `Bob` set a direct IAM grant to `Alice` on a GCS bucket that `Bob` owns).
 
 Either way, please review [Restricting project visibility for users](https://cloud.google.com/resource-manager/docs/access-control-org#restricting_visibility) in combination with [VPC-SC](https://cloud.google.com/vpc-service-controls/docs/overview).
 
@@ -172,8 +172,19 @@ time.Sleep(time.Duration(*delay) * time.Millisecond)
 which within the iteration to get the list of projects and organization:
 
 ```golang
-	req := crmService.Projects.List().Filter(noFilter).PageSize(maxPageSize)
-	err := req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
+func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
+	glog.V(50).Infof("             Getting Projects for user %s", u.PrimaryEmail)
+	defer wg.Done()
+
+	crmService, err := getResourceManagerClient(ctx, impersonateAccount, serviceAccountData, u.PrimaryEmail)
+	if err != nil {
+		glog.Errorf("Error getting cloud ResourceManager client for Projects for user %s %v", u.PrimaryEmail, err)
+		return
+	}
+
+	projects := make([]*cloudresourcemanager.Project, 0)
+	req := crmService.Projects.List().Filter(filter).PageSize(maxPageSize)
+	err = req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
 		projects = append(projects, page.Projects...)
 		if err := limiter.Wait(ctx); err != nil {
 			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
@@ -183,15 +194,13 @@ which within the iteration to get the list of projects and organization:
 	})
 	if err != nil {
 		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
-		return nil, err
 	}
 
-	for _, p := range projects {
-		glog.V(50).Infof("             User %s has Project visibility to %s", u.PrimaryEmail, p.ProjectId)
-		if _, ok := allProjects[p.ProjectId]; !ok {
-			glog.V(2).Infof("             User [%s] has external project visibility to [projects/%d](%s)", u.PrimaryEmail, p.ProjectNumber, p.ProjectId)
-		}
+	ch <- &userAccess{
+		User:     u,
+		Projects: projects,
 	}
+}
 ```
 
 It is recommended to not alter these defaults.  They have been empirically tested to stay within the quota limits and benchmarked with 
