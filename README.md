@@ -53,6 +53,12 @@ export ORGANIZATION_ID=673208786099
 
 export CX=`gcloud organizations describe $ORGANIZATION_ID --format="value(owner.directoryCustomerId)"`
 
+# Enable the apis on the project
+gcloud services enable cloudasset.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  admin.googleapis.com \
+  iamcredentials.googleapis.com --project $PROJECT_ID
+
 # create service account
 gcloud iam service-accounts create dwd-sa
 
@@ -141,20 +147,24 @@ Each API used by this script has different per-second rate limits
 
 - [Cloud Resource Manager API](https://cloud.google.com/resource-manager/docs/limits)
 
-The restrictive quota is for the Cloud Resource Manager
+The restrictive quota is for the Cloud Resource Manager is one that is not listed on the documented page but is visible on the console:
 
-- `Read operations	Up to 10 reads per second. This includes reading projects, tags, and other resources, with the exception of folders.`
+```bash
+https://console.cloud.google.com/apis/api/cloudresourcemanager.googleapis.com/metrics?project=$PROJECT_ID
+```
 
-which would lead to errors if the quota rate isn't managed over the progressive duration of the audit:
+The `project.List()` is actually limited to `4 requests/second` and exceeding ith would lead to errors if the quota rate isn't managed over the progressive duration of the audit:
 
 ```
 googleapi: Error 429: Quota exceeded for quota metric 'List projects V1' and limit 'List projects V1 per minute' 
-    of service 'cloudresourcemanager.googleapis.com' for consumer 'project_number:1111111'., rateLimitExceeded
+    of service 'cloudresourcemanager.googleapis.com' for consumer 'project_number:'., rateLimitExceeded
 ```
 
 There are several ways to work with this:
 
-- Sleep: a `sleep` is applied per User thats evaluated
+#### Sleep
+
+`sleep` is applied per User thats evaluated
 
 ```golang
 delay                      = flag.Int("delay", 1*1000, "delay in ms for each user iterated")
@@ -162,14 +172,16 @@ delay                      = flag.Int("delay", 1*1000, "delay in ms for each use
 time.Sleep(time.Duration(*delay) * time.Millisecond)
 ```
 
-- Throttling: all api calls for the resource managers is capped using `"golang.org/x/time/rate"`
+#### Throttling
+
+Limit all api calls for the resource managers globally using `"golang.org/x/time/rate"`
 
 ```golang
 	maxRequestsPerSecond float64 = 4 // "golang.org/x/time/rate" limiter to throttle operations
 	burst                int     = 1
 ```
 
-which within the iteration to get the list of projects and organization:
+which is enforced within the iteration to get the list of projects and organization per user:
 
 ```golang
 func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
@@ -211,20 +223,39 @@ It is recommended to not alter these defaults.  They have been empirically teste
 
 If you still see rate errors, reduce `maxRequestsPerSecond` and increase `delay`
 
-The other approach which is not implemented here is to shard the requests between N projects.
+#### Sharding
 
-That is, create several different "host" projects each with their own service accounts.  Then run the scripts in parallel with different impersonated service accounts. 
-Each "shard" that runs a script iterates over a smaller set of user.  For example, 
+Another approach is to use the same script but initialize using `N` service account from `N` projects.  Then for each users `projects.list()` call, select a random serviceAccount.  To use this pattern, create follow the steps above as you would to initialize a new configuration:
 
-1. create three host project `A`,`B`,`C`.
-2. create three service accounts within those project `SA`, `SB`, `SC`.
-3. run three versions of the audit scripts using different projectIDs and ServiceAccounts.
-4. each 'version' of the audit script iterates over a subset of the domain accounts.
+- Create a new project (e.g. `$PROJECT_2_ID`)
+- Enable apis
+- Create a service account (`dwd-sa@$PROJECT_2_ID.iam.gserviceaccount.com`)
+- Allow impersonation
+- Enable IAM role at organization level for service account
+- Enable domain delegation in Workspace Admin Console
 
-   - `SA` iterates of users `"A->H"`.
-   - `SB` iterates over `"I->P"`.
-   - `SC` iterates over `"Q->Z"`.
+Invoke `main.go` and specify the list of service accounts as comma-separated list.  For example
 
-This technique will shard the api quota rate limits between each of the host projects
+```bash
+go run main.go --impersonatedServiceAccount=dwd-sa@$PROJECT_ID.iam.gserviceaccount.com,dwd-sa@$PROJECT_2_ID.iam.gserviceaccount.com  \
+  --subject=$DOMAIN_ADMIN \
+  --organization $ORGANIZATION_ID \
+  -cx $CX --alsologtostderr=1 -v 50
+```
 
-Another TODO: to use the same script but initialize using `N` service account from `N` projects.  Then for each users `projects.list()` call, select a random serviceAccount.
+#### `X-Goog-User-Project`
+
+To note for completeness, the standard way to redirect quota usage is bootstrap a client and specify the quota project using [options.WithQuotaProject](https://pkg.go.dev/google.golang.org/api/option#WithQuotaProject).  That option enables `X-Goog-User-Project` [system parameter](https://cloud.google.com/apis/docs/system-parameters) to redirect quota consumption to another project.  
+
+For example usage would have been to initialize the Cloud Resource Manager client as such:
+
+```golang
+func getResourceManagerClient(...) {
+	...
+      cloudresourcemanager.NewService(ctx, option.WithTokenSource(ts),option.WithQuotaProject(targetQuotaProject))
+}   ...
+```
+
+However, the complication in applying this pattern with this script would require each end users to have the `serviceusage.services.use` IAM permission (or role `roles/serviceusage.serviceUsageConsumer`) granted on the _target project_.  Not specifying the quota project works here when used with domain delegation user impersonation as it automatically targets the quota consumption to the project that tied to the service account with domain delegation.
+
+This technique is omitted from the script.

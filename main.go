@@ -21,11 +21,11 @@ see:
 
 Arguments:
 
-	impersonatedServiceAccount = flag.String("impersonatedServiceAccount", "", "Impersonated Service Account the script should run as")
+	impersonatedServiceAccount = flag.String("impersonatedServiceAccount", "", "Impersonated Service Accounts the script should run as")
 	organization               = flag.String("organization", "", "The organizationID that is the subject of this audit")
 	subject                    = flag.String("subject", "", "The admin user to for the organization that can use the Directory API to list users")
 	cx                         = flag.String("cx", "", "Workspace Customer ID number")
-	serviceAccountFile         = flag.String("serviceAccountFile", "", "Servie Account JSON file with IAM permissions to the org")
+	serviceAccountFile         = flag.String("serviceAccountFile", "", "Servie Account JSON files with IAM permissions to the org")
 
 	-v 10  adjust log verbosity level
 
@@ -42,6 +42,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -59,9 +60,7 @@ import (
 	assetpb "google.golang.org/genproto/googleapis/cloud/asset/v1"
 )
 
-var (
-	limiter *rate.Limiter
-)
+var ()
 
 const (
 	maxRequestsPerSecond  float64 = 4 // "golang.org/x/time/rate" limiter to throttle operations
@@ -72,18 +71,17 @@ const (
 )
 
 type userAccess struct {
-	User     admin.User
-	Orgs     []*cloudresourcemanager.Organization
-	Projects []*cloudresourcemanager.Project
-	Error    error
+	User          admin.User
+	Organizations []*cloudresourcemanager.Organization
+	Projects      []*cloudresourcemanager.Project
+	Error         error
 }
 
 func main() {
 
 	var wg sync.WaitGroup
-	var svcAccountJSONBytes []byte
-	serviceAccountFile := flag.String("serviceAccountFile", "", "Servie Account JSON file with IAM permissions to the org")
-	impersonatedServiceAccount := flag.String("impersonatedServiceAccount", "", "Impersonated Service Account the script should run as")
+	serviceAccountFile := flag.String("serviceAccountFile", "", "Service Account JSON files with IAM permissions to the org")
+	impersonatedServiceAccount := flag.String("impersonatedServiceAccount", "", "Impersonated Service Accounts the script should run as")
 	organization := flag.String("organization", "", "The organizationID that is the subject of this audit")
 	subject := flag.String("subject", "", "The admin user to for the organization that can use the Directory API to list users")
 	cx := flag.String("cx", "", "Workspace Customer ID number")
@@ -95,10 +93,13 @@ func main() {
 
 	// Configure a rate limiter that will control how frequently API calls to
 	// Cloud Resource Manager is made.
-	limiter = rate.NewLimiter(rate.Limit(maxRequestsPerSecond), burst)
+	limiter := rate.NewLimiter(rate.Limit(maxRequestsPerSecond), burst)
+
+	// Initialize a randomSeed for use later
+	rand.Seed(time.Now().UnixNano())
 
 	if *organization == "" || *subject == "" || *cx == "" {
-		glog.Error("--organization and --cx and --subject   must be specified")
+		glog.Error("--organization, --cx and --subject must be specified")
 		return
 	}
 	if (*serviceAccountFile == "" && *impersonatedServiceAccount == "") || (*serviceAccountFile != "" && *impersonatedServiceAccount != "") {
@@ -106,19 +107,22 @@ func main() {
 		return
 	}
 
-	if *serviceAccountFile != "" {
-		var err error
-		svcAccountJSONBytes, err = ioutil.ReadFile(*serviceAccountFile)
-		if err != nil {
-			glog.Fatal(err)
-		}
+	// Parse the serviceAccount names or keys provided. Multiple values can be set to shard API quota between projects.
+	serviceAccounts, svcAccountKeys, err := parseServiceAccounts(*impersonatedServiceAccount, *serviceAccountFile)
+	if err != nil {
+		glog.Errorf("Error parsing serviceAccounts %v", err)
+		return
 	}
+
+	// Select an random serviceAccount to use.
+	impersonateAccount, svcKeyCred := getRandomServiceAccount(serviceAccounts, svcAccountKeys)
 
 	// Initialize the Cloud Asset API.
 	// This api is used to find the projects in an ORG
-	assetClient, err := getAssetClient(ctx, *impersonatedServiceAccount, svcAccountJSONBytes)
+	assetClient, err := getAssetClient(ctx, impersonateAccount, svcKeyCred)
 	if err != nil {
-		glog.Fatal(err)
+		glog.Errorf("Error getting Cloud Asset API Client %v", err)
+		return
 	}
 
 	// Use the Cloud Asset API to recall/find the Organization for provided organizationID.
@@ -128,7 +132,8 @@ func main() {
 	emptyQuery := ""
 	allOrganizations, err := findResourcesByAssetType(ctx, *organization, assetTypeOrganization, emptyQuery, assetClient)
 	if err != nil {
-		glog.Fatal(err)
+		glog.Errorf("Error finding Organizations %v", err)
+		return
 	}
 
 	// Use the Cloud Asset API to recall/find the projects for provided organizationID.
@@ -139,16 +144,18 @@ func main() {
 	// see https://cloud.google.com/asset-inventory/docs/searching-resources#how_to_construct_a_query
 	allProjects, err := findResourcesByAssetType(ctx, *organization, assetTypeProject, emptyQuery, assetClient)
 	if err != nil {
-		glog.Fatal(err)
+		glog.Errorf("Error finding all projects in the organization %v", err)
+		return
 	}
 
 	glog.V(20).Infoln("      Getting Users")
 
 	// Initialize the Workspace Admin client
 	// This client will be used to find users in a given Cloud Identity/Workspace domain
-	adminService, err := getAdminServiceClient(ctx, *impersonatedServiceAccount, svcAccountJSONBytes, *subject)
+	adminService, err := getAdminServiceClient(ctx, impersonateAccount, svcKeyCred, *subject)
 	if err != nil {
-		glog.Fatal(err)
+		glog.Errorf("Error initializing admin client %v", err)
+		return
 	}
 
 	// If you want to narrow the search to a subset of users, apply a searchFilter here
@@ -158,13 +165,13 @@ func main() {
 	searchFilter := ""
 	allUsers, err := findDomainUsers(ctx, *cx, searchFilter, adminService)
 	if err != nil {
-		glog.Fatal(err)
+		glog.Errorf("Error finding domain users %v", err)
+		return
 	}
 
-	// Launch goroutines that will query which projects and
-	// organizations the current user has visibility to.
-	// The getOrganizations(), and getProjects() applies the findings
-	// back to a go channel below for processing:
+	// Launch a goroutines that will process the projects and organizations
+	// that are visible to users.  The channel is fed by the
+	// getOrganizations(), and getProjects() function calls in the succeeding stanza.
 	ch := make(chan *userAccess)
 	done := make(chan bool)
 	go func() {
@@ -172,9 +179,9 @@ func main() {
 			msg, ok := <-ch
 			if ok {
 				if msg.Error != nil {
-					glog.Errorf("Error iterating for user %s %v", msg.User.PrimaryEmail, msg.Error)
+					glog.Errorf("Error iterating: %v", msg.Error)
 				} else {
-					for _, o := range msg.Orgs {
+					for _, o := range msg.Organizations {
 						glog.V(50).Infof("             User %s has Organization visibility to %s", msg.User.PrimaryEmail, o.Name)
 						if _, ok := allOrganizations[o.Name]; !ok {
 							glog.V(2).Infof("             User [%s] has external organization visibility to [%s](%s)", msg.User.PrimaryEmail, o.Name, o.DisplayName)
@@ -194,14 +201,19 @@ func main() {
 		}
 	}()
 
+	// Launch goroutines for each user that feeds a channel received the the go routine defined in the preceding stanza.
 	for _, u := range allUsers {
+
+		// Select a random service account to use per user and disribute quota consumption
+		impersonateAccount, svcKeyCred := getRandomServiceAccount(serviceAccounts, svcAccountKeys)
+
 		// We need to iterate over all organizations visible to the current user
 		// The noFilter is explicitly defined here to allow you to modify which organizations to
 		// limit the query.
 		// see https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#SearchOrganizationsRequest
 		noFilter := ""
 		wg.Add(1)
-		go getOrganizations(ctx, ch, &wg, noFilter, *impersonatedServiceAccount, svcAccountJSONBytes, *u)
+		go getOrganizations(ctx, ch, &wg, limiter, noFilter, impersonateAccount, svcKeyCred, *u)
 
 		//  The Project.List() accepts a Filter parameter which will return a subset
 		//  of projects that match the  specifications.
@@ -211,7 +223,7 @@ func main() {
 		//  subset of projects.  See:
 		//  https://pkg.go.dev/google.golang.org/api@v0.58.0/cloudresourcemanager/v1#ProjectsListCall.Filter
 		wg.Add(1)
-		go getProjects(ctx, ch, &wg, noFilter, *impersonatedServiceAccount, svcAccountJSONBytes, *u)
+		go getProjects(ctx, ch, &wg, limiter, noFilter, impersonateAccount, svcKeyCred, *u)
 		time.Sleep(time.Duration(*delay) * time.Millisecond)
 	}
 
@@ -220,6 +232,42 @@ func main() {
 	close(ch)
 	// wait for all the messages to get processed
 	<-done
+}
+
+// If multiple service accounts are specified in the command line, parse each one of them
+func parseServiceAccounts(impersonatedAccounts, keysFiles string) ([]string, [][]byte, error) {
+	var serviceAccountPool []string
+	var keyBytesPool [][]byte
+	if keysFiles != "" {
+		for _, k := range strings.Split(keysFiles, ",") {
+			svcAccountJSONBytes, err := ioutil.ReadFile(k)
+			if err != nil {
+				return nil, nil, err
+			}
+			keyBytesPool = append(keyBytesPool, svcAccountJSONBytes)
+		}
+	}
+
+	if impersonatedAccounts != "" {
+		serviceAccountPool = strings.Split(impersonatedAccounts, ",")
+	}
+
+	return serviceAccountPool, keyBytesPool, nil
+}
+
+func getRandomServiceAccount(accounts []string, keys [][]byte) (string, []byte) {
+	var selectedAccount string
+	var selectedKey []byte
+	if len(accounts) > 0 {
+		selectedAccount = accounts[rand.Intn(len(accounts))]
+		glog.V(50).Infof("             Selecting serviceAccount: %s", selectedAccount)
+	}
+	if len(keys) > 0 {
+		keyIndex := rand.Intn(len(keys))
+		selectedKey = keys[keyIndex]
+		glog.V(50).Infof("             Selecting serviceAccount keyIndex value: %d", keyIndex)
+	}
+	return selectedAccount, selectedKey
 }
 
 func findDomainUsers(ctx context.Context, cx string, searchFilter string, adminService *admin.Service) ([]*admin.User, error) {
@@ -276,6 +324,8 @@ func findResourcesByAssetType(ctx context.Context, organizationID string, assetT
 			projectID := strings.TrimPrefix(response.Name, "//cloudresourcemanager.googleapis.com/projects/")
 			glog.V(20).Infof("     Found projectID %s", projectID)
 			resourceList[projectID] = response
+		default:
+			return nil, fmt.Errorf(fmt.Sprintf("Error getting resources:  unknown assetType: %s", assetType))
 		}
 	}
 	return resourceList, nil
@@ -349,16 +399,15 @@ func getResourceManagerClient(ctx context.Context, impersonateAccount string, se
 	}
 }
 
-func getOrganizations(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
+func getOrganizations(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, limiter *rate.Limiter, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
 	glog.V(50).Infof("             Getting Organizations for user %s", u.PrimaryEmail)
 	defer wg.Done()
 
 	crmService, err := getResourceManagerClient(ctx, impersonateAccount, serviceAccountData, u.PrimaryEmail)
 	if err != nil {
-		glog.Errorf("Error getting cloud ResourceManager client for Organizations for user %s %v", u.PrimaryEmail, err)
 		ch <- &userAccess{
 			User:  u,
-			Error: err,
+			Error: fmt.Errorf("error getting Cloud ResourceManager client for organizations for user %s %v", u.PrimaryEmail, err),
 		}
 		return
 	}
@@ -369,36 +418,34 @@ func getOrganizations(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitG
 	err = req.Pages(ctx, func(page *cloudresourcemanager.SearchOrganizationsResponse) error {
 		organizations = append(organizations, page.Organizations...)
 		if err := limiter.Wait(ctx); err != nil {
-			glog.Fatalf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
+			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
 			return err
 		}
 		return nil
 	})
 	if err != nil {
-		glog.Errorf("Error iterating visible organizations for user %s %v", u.PrimaryEmail, err)
 		ch <- &userAccess{
 			User:  u,
-			Error: err,
+			Error: fmt.Errorf("error iterating visible organizations for user %s %v", u.PrimaryEmail, err),
 		}
 		return
 	}
 
 	ch <- &userAccess{
-		User: u,
-		Orgs: organizations,
+		User:          u,
+		Organizations: organizations,
 	}
 }
 
-func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
+func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, limiter *rate.Limiter, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
 	glog.V(50).Infof("             Getting Projects for user %s", u.PrimaryEmail)
 	defer wg.Done()
 
 	crmService, err := getResourceManagerClient(ctx, impersonateAccount, serviceAccountData, u.PrimaryEmail)
 	if err != nil {
-		glog.Errorf("Error getting cloud ResourceManager client for Projects for user %s %v", u.PrimaryEmail, err)
 		ch <- &userAccess{
 			User:  u,
-			Error: err,
+			Error: fmt.Errorf("error getting Cloud ResourceManager client for projects for user %s %v", u.PrimaryEmail, err),
 		}
 		return
 	}
@@ -414,10 +461,9 @@ func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup,
 		return nil
 	})
 	if err != nil {
-		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
 		ch <- &userAccess{
 			User:  u,
-			Error: err,
+			Error: fmt.Errorf("error iterating visible projects for user %s %v", u.PrimaryEmail, err),
 		}
 		return
 	}
