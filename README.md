@@ -93,7 +93,9 @@ Navigate to the Google Workspace Console and enable [Domain Wide Delegation](htt
 Enter the `$SA_CLIENT_ID` for the service account and these _precise_  scopes
 
 * `https://www.googleapis.com/auth/admin.directory.user.readonly`
-* `https://www.googleapis.com/auth/cloud-platform.read-only`
+* `https://www.googleapis.com/auth/cloud-platform`
+
+Note, we really should only need * `https://www.googleapis.com/auth/cloud-platform.read-only` scope here but the Cloud ResourceManager [v3 API calls](https://cloudresourcemanager.googleapis.com/$discovery/rest?version=v3) `projects.Query()` method declares `https://www.googleapis.com/auth/cloud-platform`  (which is a bug).
 
 Domain Delegation Scope permission:
 
@@ -133,6 +135,13 @@ I1003 09:59:33.252026  485974 main.go:147]              User [user10@mydomain.co
 ```
 
 Output logs are also written to file through [glog](https://pkg.go.dev/github.com/golang/glog) level logging package.  By default the `ERROR|INFO|etc` level logs are under `/tmp/` (eg `/tmp/main.INFO`).  Adjust the log verbosity with `-v` flag.
+
+Check `/tmp/main.ERROR` log for users that threw exceptions and were skipped.   You can selectively run the script to evaluate individual users by setting the `searchFilter` variable.  For example, to evaluate one user only:
+
+```golang
+	searchFilter := "email=alice@mydomain.com"
+	allUsers, err := findDomainUsers(ctx, *cx, searchFilter, adminService)
+```
 
 ---
 
@@ -184,19 +193,12 @@ Limit all api calls for the resource managers globally using `"golang.org/x/time
 which is enforced within the iteration to get the list of projects and organization per user:
 
 ```golang
-func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup, filter string, impersonateAccount string, serviceAccountData []byte, u admin.User) {
+func getProjects(ctx context.Context, limiter *rate.Limiter, filter string, fields string, crmService cloudresourcemanager.Service, u admin.User) ([]*cloudresourcemanager.Project, error) {
 	glog.V(50).Infof("             Getting Projects for user %s", u.PrimaryEmail)
-	defer wg.Done()
-
-	crmService, err := getResourceManagerClient(ctx, impersonateAccount, serviceAccountData, u.PrimaryEmail)
-	if err != nil {
-		glog.Errorf("Error getting cloud ResourceManager client for Projects for user %s %v", u.PrimaryEmail, err)
-		return
-	}
 
 	projects := make([]*cloudresourcemanager.Project, 0)
-	req := crmService.Projects.List().Filter(filter).PageSize(maxPageSize)
-	err = req.Pages(ctx, func(page *cloudresourcemanager.ListProjectsResponse) error {
+	req := crmService.Projects.Search().Query(filter).Fields(googleapi.Field(fields)).PageSize(maxPageSize)
+	err := req.Pages(ctx, func(page *cloudresourcemanager.SearchProjectsResponse) error {
 		projects = append(projects, page.Projects...)
 		if err := limiter.Wait(ctx); err != nil {
 			glog.Errorf("Error in rate limiter for user %s %v", u.PrimaryEmail, err)
@@ -205,13 +207,10 @@ func getProjects(ctx context.Context, ch chan<- *userAccess, wg *sync.WaitGroup,
 		return nil
 	})
 	if err != nil {
-		glog.Errorf("Error iterating visible projects for user %s %v", u.PrimaryEmail, err)
+		return nil, err
 	}
 
-	ch <- &userAccess{
-		User:     u,
-		Projects: projects,
-	}
+	return projects, nil
 }
 ```
 

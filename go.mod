@@ -1,4 +1,4 @@
-module main
+module github.com/salrashid123/iam_visibility_audit
 
 go 1.17
 
