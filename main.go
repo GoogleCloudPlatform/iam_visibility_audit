@@ -71,7 +71,6 @@ const (
 
 func main() {
 
-	var wg sync.WaitGroup
 	serviceAccountFile := flag.String("serviceAccountFile", "", "Service Account JSON files with IAM permissions to the org")
 	impersonatedServiceAccount := flag.String("impersonatedServiceAccount", "", "Impersonated Service Accounts the script should run as")
 	organization := flag.String("organization", "", "The organizationID that is the subject of this audit")
@@ -173,6 +172,7 @@ func main() {
 	glog.V(10).Infof("      Total Users in Organization %d", len(allUsers))
 
 	// Launch goroutines for each user and find which projects and organizations they have access to
+	var wg sync.WaitGroup
 	for _, u := range allUsers {
 
 		wg.Add(1)
@@ -227,14 +227,14 @@ func main() {
 			// Find the projects and organizations that do NOT exist in the list of projects under the subject organization.
 			// The projects the user has access to that is not included in []allProjects should be outside the subject organization.
 			for _, o := range userOrganizations {
-				glog.V(50).Infof("             User %s has Organization visibility to %s", u.PrimaryEmail, o.Name)
+				glog.V(50).Infof("             User [%s] has Organization visibility to %s", u.PrimaryEmail, o.Name)
 				if _, ok := allOrganizations[o.Name]; !ok {
 					glog.V(2).Infof("             User [%s] has external organization visibility to [%s](%s)", u.PrimaryEmail, o.Name, o.DisplayName)
 				}
 			}
 			glog.V(50).Infof("             User [%s] can see %d projects", u.PrimaryEmail, len(userProjects))
 			for _, p := range userProjects {
-				glog.V(50).Infof("             User %s has Project visibility to %s", u.PrimaryEmail, p.ProjectId)
+				glog.V(50).Infof("             User [%s] has Project visibility to %s", u.PrimaryEmail, p.ProjectId)
 				if _, ok := allProjects[p.ProjectId]; !ok {
 					glog.V(2).Infof("             User [%s] has external project visibility to [%s](%s)", u.PrimaryEmail, p.Name, p.ProjectId)
 				}
@@ -289,24 +289,13 @@ func getRandomServiceAccount(accounts []string, keys [][]byte) (string, []byte, 
 func findDomainUsers(ctx context.Context, cx string, searchFilter string, adminService *admin.Service) ([]*admin.User, error) {
 
 	allUsers := make([]*admin.User, 0)
-	pageToken := ""
 	q := adminService.Users.List().Customer(cx).Query(searchFilter)
-	for {
-		if pageToken != "" {
-			q = q.PageToken(pageToken)
-		}
-		r, err := q.Do()
-		if err != nil {
-			return nil, err
-		}
-		for _, u := range r.Users {
-			glog.V(20).Infof("      Found User: %s", u.PrimaryEmail)
-			allUsers = append(allUsers, u)
-		}
-		pageToken = r.NextPageToken
-		if pageToken == "" {
-			break
-		}
+	err := q.Pages(ctx, func(page *admin.Users) error {
+		allUsers = append(allUsers, page.Users...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return allUsers, nil
 }
@@ -319,6 +308,7 @@ func findResourcesByAssetType(ctx context.Context, organizationID string, assetT
 		Scope:      fmt.Sprintf("organizations/%s", organizationID),
 		Query:      query,
 		AssetTypes: []string{assetType},
+		PageSize:   int32(maxPageSize),
 	}
 
 	it := assetClient.SearchAllResources(ctx, req)
@@ -341,7 +331,7 @@ func findResourcesByAssetType(ctx context.Context, organizationID string, assetT
 			glog.V(20).Infof("     Found projectID %s", projectID)
 			resourceList[projectID] = response
 		default:
-			return nil, fmt.Errorf(fmt.Sprintf("Error getting resources:  unknown assetType: %s", assetType))
+			return nil, fmt.Errorf("error getting resources:  unknown assetType: %s", assetType)
 		}
 	}
 	return resourceList, nil
