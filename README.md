@@ -27,6 +27,8 @@ This script will:
 5. If the user has access to any other organization that's not in the subject org in #1, print that external org.
 6. If the user has access to any other project thats not in the set in #1, print that external project.
 
+In order to ensure all users of the domain are part of this audit, it is recommended that all unmanaged users of your [domain](https://support.google.com/a/answer/6178640?hl=en) are migrated into your Workspace or Cloud Identity account.
+
 For more information about Workspace domain delegation and _user impersonation_, see [Authentication Best Practices for Workspace APIs](https://static.googleusercontent.com/media/www.google.com/en//support/enterprise/static/gapps/docs/admin/en/gapps_workspace/Google%20Workspace%20APIs%20-%20Authentication%20Best%20Practices.pdf).
 
 ### Usage
